@@ -319,6 +319,41 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	return DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
+static void EnableDarkmode(HWND hwnd) {
+	const int AllowDark = 1;
+	const int WCA_USEDARKMODECOLORS = 26;
+	struct WINDOWCOMPOSITIONATTRIBDATA {
+		int Attrib;
+		PVOID pvData;
+		SIZE_T cbData;
+	};
+	using fnADMFW =  BOOL (WINAPI *)(HWND hWnd, BOOL allow);
+	using fnSPAM = int (WINAPI *)(int appMode);
+	using fnSWCA =  BOOL (WINAPI *)(HWND hwnd, WINDOWCOMPOSITIONATTRIBDATA *);
+
+	HMODULE hUxtheme = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+	HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+	auto AllowDarkModeForWindow = reinterpret_cast<fnADMFW>(
+		GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133))
+	);
+	auto SetPreferredAppMode = reinterpret_cast<fnSPAM>(
+		GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135))
+	);
+	auto SetWindowCompositionAttribute = reinterpret_cast<fnSWCA>(
+		GetProcAddress(hUser32, "SetWindowCompositionAttribute")
+	);
+
+	SetPreferredAppMode(AllowDark);
+	BOOL dark = TRUE;
+	AllowDarkModeForWindow(hwnd, dark);
+	WINDOWCOMPOSITIONATTRIBDATA data = {
+		WCA_USEDARKMODECOLORS,
+		&dark,
+		sizeof(dark)
+	};
+	SetWindowCompositionAttribute(hwnd, &data);
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR p_cmd_line, int n_cmd_show) {
 	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
 
@@ -416,6 +451,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR p_cmd_lin
 		&context
 	);
 	if (hwnd == NULL) return 1;
+	EnableDarkmode(hwnd);
 	context.hwnd = hwnd;
 	RECT window_rect;
 	DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &window_rect, sizeof(RECT));
