@@ -82,7 +82,7 @@ struct Renderer {
     IDWriteFontFace1 *font_face;
 
 	IDWriteFactory4 *dwrite_factory;
-	IDWriteTextFormat *dwrite_text_format;
+	IDWriteTextFormat2 *dwrite_text_format;
 
 	bool disable_ligatures;
 	IDWriteTypography *dwrite_typography;
@@ -91,6 +91,7 @@ struct Renderer {
 
     float last_requested_font_size;
 	wchar_t font[MAX_FONT_LENGTH];
+	Vec<Array<wchar_t, MAX_FONT_LENGTH>> fallback_fonts;
 	DWRITE_FONT_METRICS1 font_metrics;
 	float dpi_scale;
     float font_size;
@@ -116,7 +117,7 @@ void RendererShutdown(Renderer *renderer);
 
 void RendererResize(Renderer *renderer, uint32_t width, uint32_t height);
 void RendererUpdateGuiFont(Renderer *renderer, const char *guifont, size_t strlen);
-void RendererUpdateFont(Renderer *renderer, float font_size, const char *font_string = "", int strlen = 0);
+void RendererUpdateFont(Renderer *renderer, float font_size, Vec<Array<wchar_t, MAX_FONT_LENGTH>> *fonts = NULL);
 void RendererRedraw(Renderer *renderer, mpack_node_t params);
 
 PixelSize RendererGridToPixelSize(Renderer *renderer, int rows, int cols);

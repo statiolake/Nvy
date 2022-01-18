@@ -8,6 +8,7 @@ project(Nvy)
 add_executable(Nvy WIN32 "resources/third_party/nvim_icon.rc")
 
 set(Nvy_HEADERS
+    "src/common/array.h"
     "src/common/dx_helper.h"
     "src/common/mpack_helper.h"
     "src/common/vec.h"
@@ -61,6 +62,7 @@ target_precompile_headers(Nvy PUBLIC
     
     "src/third_party/mpack/mpack.h"
 
+    "src/common/array.h"
     "src/common/dx_helper.h"
     "src/common/mpack_helper.h"
     "src/common/vec.h"

@@ -164,6 +164,18 @@ void HandleDeviceLost(Renderer *renderer) {
 	);
 }
 
+bool ConvertStringPartToWideChar(const char *str, int len, Array<wchar_t, MAX_FONT_LENGTH> *out) {
+	int wstrlen = MultiByteToWideChar(CP_UTF8, 0, str, len, 0, 0);
+	if (wstrlen == 0 || wstrlen >= MAX_FONT_LENGTH) {
+		return false;
+	}
+
+	MultiByteToWideChar(CP_UTF8, 0, str, len, out->data(), out->size());
+	out->data()[wstrlen] = L'\0';
+
+	return true;
+}
+
 void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, float linespace_factor, float monitor_dpi) {
 	renderer->hwnd = hwnd;
 	renderer->disable_ligatures = disable_ligatures;
@@ -176,7 +188,13 @@ void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, f
 	InitializeD3D(renderer);
 	InitializeDWrite(renderer);
 	renderer->glyph_renderer = new GlyphRenderer(renderer);
-	RendererUpdateFont(renderer, DEFAULT_FONT_SIZE, DEFAULT_FONT, static_cast<int>(strlen(DEFAULT_FONT)));
+
+	Array<wchar_t, MAX_FONT_LENGTH> default_font;
+	ConvertStringPartToWideChar(DEFAULT_FONT, strlen(DEFAULT_FONT), &default_font);
+	Vec<Array<wchar_t, MAX_FONT_LENGTH>> default_fonts;
+	default_fonts.push_back(default_font);
+
+	RendererUpdateFont(renderer, DEFAULT_FONT_SIZE, &default_fonts);
 }
 
 void RendererAttach(Renderer *renderer) {
@@ -230,17 +248,19 @@ float GetTextWidth(Renderer *renderer, wchar_t *text, uint32_t length) {
 	return metrics.width;
 }
 
-void UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_string, int strlen) {
+void UpdateFontMetrics(Renderer *renderer, float font_size, Vec<Array<wchar_t, MAX_FONT_LENGTH>> *fonts) {
     font_size = max(5.0f, min(font_size, 150.0f));
     renderer->last_requested_font_size = font_size;
 
 	IDWriteFontCollection *font_collection;
 	WIN_CHECK(renderer->dwrite_factory->GetSystemFontCollection(&font_collection));
 
-	int wstrlen = MultiByteToWideChar(CP_UTF8, 0, font_string, strlen, 0, 0);
-	if (wstrlen != 0 && wstrlen < MAX_FONT_LENGTH) {
-		MultiByteToWideChar(CP_UTF8, 0, font_string, strlen, renderer->font, MAX_FONT_LENGTH - 1);
-		renderer->font[wstrlen] = L'\0';
+	if (fonts != NULL && fonts->size() > 0) {
+		memcpy(renderer->font, fonts[0].data(), MAX_FONT_LENGTH);
+		renderer->fallback_fonts.clear();
+		for (int i = 1; i < fonts->size(); i++) {
+			renderer->fallback_fonts.push_back((*fonts)[i]);
+		}
 	}
 
 	uint32_t index;
@@ -289,6 +309,7 @@ void UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
     renderer->font_height = renderer->font_ascent + renderer->font_descent;
     renderer->font_height *= renderer->linespace_factor;
 
+	IDWriteTextFormat *dwrite_text_format;
 	WIN_CHECK(renderer->dwrite_factory->CreateTextFormat(
 		renderer->font,
 		nullptr,
@@ -297,8 +318,45 @@ void UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
 		DWRITE_FONT_STRETCH_NORMAL,
 		renderer->font_size,
 		L"en-us",
-		&renderer->dwrite_text_format
+		&dwrite_text_format
 	));
+	WIN_CHECK(dwrite_text_format->QueryInterface<IDWriteTextFormat2>(&renderer->dwrite_text_format));
+	SafeRelease(&dwrite_text_format);
+
+	// set fallback fonts
+	IDWriteFontFallbackBuilder *dwrite_fallback_builder;
+	WIN_CHECK(renderer->dwrite_factory->CreateFontFallbackBuilder(&dwrite_fallback_builder));
+	for (int i = 0; i < renderer->fallback_fonts.size(); i++) {
+		const wchar_t *family_name = renderer->fallback_fonts[i].data();
+		BOOL exists;
+		uint32_t index;
+		font_collection->FindFamilyName(family_name, &index, &exists);
+		if (!exists) {
+			continue;
+		}
+
+		IDWriteFontFamily *font_family;
+		WIN_CHECK(font_collection->GetFontFamily(index, &font_family));
+
+		IDWriteFont *font;
+		WIN_CHECK(font_family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font));
+		IDWriteFont1 *font1;
+		WIN_CHECK(font->QueryInterface(&font1));
+
+		Vec<DWRITE_UNICODE_RANGE> ranges;
+		ranges.resize(1);
+		uint32_t range_count;
+		while (font1->GetUnicodeRanges(ranges.size(), ranges.data(), &range_count) == E_NOT_SUFFICIENT_BUFFER) {
+			ranges.resize(ranges.size() * 2);
+		}
+
+		const wchar_t *family_names[] = {family_name};
+		WIN_CHECK(dwrite_fallback_builder->AddMapping(ranges.data(), range_count, family_names, 1));
+	}
+	IDWriteFontFallback *dwrite_font_fallback;
+	WIN_CHECK(dwrite_fallback_builder->CreateFontFallback(&dwrite_font_fallback));
+	WIN_CHECK(renderer->dwrite_text_format->SetFontFallback(dwrite_font_fallback));
+	SafeRelease(&dwrite_fallback_builder);
 
 	WIN_CHECK(renderer->dwrite_text_format->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, renderer->font_height, renderer->font_ascent * renderer->linespace_factor));
 	WIN_CHECK(renderer->dwrite_text_format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR));
@@ -310,12 +368,12 @@ void UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
 	SafeRelease(&font_collection);
 }
 
-void RendererUpdateFont(Renderer *renderer, float font_size, const char *font_string, int strlen) {
+void RendererUpdateFont(Renderer *renderer, float font_size, Vec<Array<wchar_t, MAX_FONT_LENGTH>> *fonts) {
 	if (renderer->dwrite_text_format) {
 		renderer->dwrite_text_format->Release();
 	}
 
-	UpdateFontMetrics(renderer, font_size, font_string, strlen);
+	UpdateFontMetrics(renderer, font_size, fonts);
 }
 
 void UpdateDefaultColors(Renderer *renderer, mpack_node_t default_colors) {
@@ -861,30 +919,69 @@ void DrawBorderRectangles(Renderer *renderer) {
     }
 }
 
+// Parse `Consolas:h12,Meiryo` style guifont settings
+bool ParseGuiFontWithFallback(const char *guifont, int strlen, float *font_size, Vec<Array<wchar_t, MAX_FONT_LENGTH>> *fonts) {
+	// Find final pointer
+	const char *guifont_end = guifont + strlen;
+
+	// Parse fonts
+	const char *start = guifont;
+	while (start != guifont_end) {
+		// Get current part splitted by `,`.
+		const char *end = strstr(start, ",");
+		if (end == NULL) {
+			end = guifont_end;
+		}
+
+		// Now start..end is a part
+		const char *name_start = start;
+		const char *name_end = end;
+
+		// Find :h to determine font size
+		const char *size_start = strstr(start, ":h");
+		const char *size_end = end;
+		if (size_start != NULL && size_start < end) {
+			// If :h is contained in the current part, parse the size.
+			// Adjust name_end, font_size should be before :h.
+			name_end = size_start;
+			size_start += 2;
+
+			// Assume font size part of string is less than 256 characters
+			char size_str[256];
+			memcpy(size_str, size_start, size_end - size_start);
+			size_str[size_end - size_start] = '\0';
+
+			// Prefer the last specified size if more than one sizes are supplied
+			*font_size = static_cast<float>(atof(size_str));
+		}
+
+		// Copy name_start..name_end as a font name
+		Array<wchar_t, MAX_FONT_LENGTH> buf;
+		ConvertStringPartToWideChar(name_start, name_end - name_start, &buf);
+		fonts->push_back(buf);
+
+		// Move to the next part
+		if (end == guifont_end) {
+			// If we parse entire string, finish it.
+			start = guifont_end;
+		} else {
+			// The next start is end + 1, since *end == ','
+			start = end + 1;
+		}
+	}
+
+	return true;
+}
+
 void RendererUpdateGuiFont(Renderer *renderer, const char *guifont, size_t strlen) {
 	if (strlen == 0) {
 		return;
 	}
 
-	const char *size_str = strstr(guifont, ":h");
-	if (!size_str) {
-		return;
-	}
-
-	size_t font_str_len = size_str - guifont;
-	size_t size_str_len = strlen - (font_str_len + 2);
-	size_str += 2;
-
 	float font_size = DEFAULT_FONT_SIZE;
-	// Assume font size part of string is less than 256 characters
-	if(size_str_len < 256) {
-		char font_size_str[256];
-		memcpy(font_size_str, size_str, size_str_len);
-		font_size_str[size_str_len] = '\0';
-		font_size = static_cast<float>(atof(font_size_str));
-	}
-
-	RendererUpdateFont(renderer, font_size, guifont, static_cast<int>(font_str_len));
+	Vec<Array<wchar_t, MAX_FONT_LENGTH>> fonts;
+	ParseGuiFontWithFallback(guifont, strlen, &font_size, &fonts);
+	RendererUpdateFont(renderer, font_size, &fonts);
 }
 
 void SetGuiOptions(Renderer *renderer, mpack_node_t option_set) {
