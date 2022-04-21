@@ -482,8 +482,12 @@ void DrawGridLine(Renderer *renderer, int row) {
 	int col_offset = 0;
 
 	for (int i = 0; i < renderer->grid_cols; ++i) {
-		// Correct font width
-		float width = renderer->grid_cell_properties[base + i].is_wide_char ? renderer->font_width * 2.0f : renderer->font_width;
+		// Correct font width.
+		//
+		// The character should be wide if and only if the right cell
+		// is '\0': CellProperty::is_wide_char is often unrelated.
+		bool should_wide_width = (i != renderer->grid_cols - 1 && renderer->grid_chars[base + i + 1] == L'\0');
+		float width = should_wide_width ? renderer->font_width * 2.0f : renderer->font_width;
 		DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i), .length = 1 };
 		// Hacky. By specifying -100 (huge negative value) for trailing spaces,
 		// a character will be collapsed. However, by setting
