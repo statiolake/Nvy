@@ -134,7 +134,6 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 		&target_bitmap_properties,
 		&renderer->d2d_target_bitmap
 	));
-	renderer->d2d_context->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 
 	SafeRelease(&dxgi_backbuffer);
 }
@@ -419,6 +418,7 @@ void ApplyHighlightAttributes(Renderer *renderer, HighlightAttributes *hl_attrib
 	}
 	if (hl_attribs->flags & HL_ATTRIB_UNDERCURL) {
 		text_layout->SetUnderline(true, range);
+		drawing_effect->is_undercurl = true;
 	}
 	text_layout->SetDrawingEffect(drawing_effect, range);
 }

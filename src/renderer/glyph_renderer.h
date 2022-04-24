@@ -4,7 +4,8 @@ struct DECLSPEC_UUID("8d4d2884-e4d9-11ea-87d0-0242ac130003") GlyphDrawingEffect 
 	GlyphDrawingEffect(uint32_t text_color, uint32_t special_color) : 
         ref_count(0), 
         text_color(text_color), 
-        special_color(special_color) {}
+        special_color(special_color),
+		is_undercurl(false) {}
 
 	inline ULONG AddRef() noexcept override {
 		return InterlockedIncrement(&ref_count);
@@ -24,6 +25,7 @@ struct DECLSPEC_UUID("8d4d2884-e4d9-11ea-87d0-0242ac130003") GlyphDrawingEffect 
 	ULONG ref_count;
     uint32_t text_color;
     uint32_t special_color;
+	bool is_undercurl;
 };
 
 struct Renderer;

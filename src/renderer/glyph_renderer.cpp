@@ -1,5 +1,6 @@
 #include "glyph_renderer.h"
 #include "renderer/renderer.h"
+#include <DirectXMath.h>
 
 HRESULT GlyphDrawingEffect::QueryInterface(REFIID riid, void **ppv_object) noexcept {
 	if (__uuidof(GlyphDrawingEffect) == riid) {
@@ -166,25 +167,64 @@ HRESULT GlyphRenderer::DrawUnderline(void *client_drawing_context, float baselin
 	HRESULT hr = S_OK;
 	Renderer *renderer = reinterpret_cast<Renderer *>(client_drawing_context);
 
+	bool is_undercurl = false;
 	if (client_drawing_effect)
 	{
 		GlyphDrawingEffect *drawing_effect;
 		client_drawing_effect->QueryInterface(__uuidof(GlyphDrawingEffect), reinterpret_cast<void **>(&drawing_effect));
 		temp_brush->SetColor(D2D1::ColorF(drawing_effect->special_color));
+		is_undercurl = drawing_effect->is_undercurl;
 		SafeRelease(&drawing_effect);
 	}
 	else {
 		temp_brush->SetColor(D2D1::ColorF(renderer->hl_attribs[0].special));
 	}
 
-	D2D1_RECT_F rect = D2D1_RECT_F {
-		.left = baseline_origin_x,
-		.top = baseline_origin_y + underline->offset,
-		.right = baseline_origin_x + underline->width,
-		.bottom = baseline_origin_y + underline->offset + max(underline->thickness, 1.0f)
-	};
+	// Values are taken from Neovim-qt.
+	float thickness = std::fmax(1.0, renderer->font_height / 16.0);
+	float scale = std::fmin(3.0 * DirectX::XM_PI / renderer->font_width, DirectX::XM_PI / 2.0);
+	float amp = 1.0 / scale;
 
-    renderer->d2d_context->FillRectangle(rect, temp_brush);
+	if (is_undercurl) {
+		ID2D1PathGeometry* path_geometry;
+		WIN_CHECK(renderer->d2d_factory->CreatePathGeometry(&path_geometry));
+
+		ID2D1GeometrySink* geometry_sink;
+		WIN_CHECK(path_geometry->Open(&geometry_sink));
+
+		float offset_x = baseline_origin_x;
+		float offset_y = baseline_origin_y + underline->offset;
+
+		for (int t = 0; t <= underline->width + 1; ++t)
+		{
+			float x = offset_x + t;
+			float y = offset_y + amp * DirectX::XMScalarSin(x * scale);
+			D2D1_POINT_2F pt = D2D1::Point2F(x, y);
+
+			if (t == 0)
+				geometry_sink->BeginFigure(pt, D2D1_FIGURE_BEGIN_HOLLOW);
+			else
+				geometry_sink->AddLine(pt);
+		}
+
+		geometry_sink->EndFigure(D2D1_FIGURE_END_OPEN);
+		WIN_CHECK(geometry_sink->Close());
+
+		renderer->d2d_context->DrawGeometry(path_geometry, temp_brush, thickness);
+
+		SafeRelease(&path_geometry);
+		SafeRelease(&geometry_sink);
+	} else {
+		D2D1_RECT_F rect = D2D1_RECT_F {
+			.left = baseline_origin_x,
+			.top = baseline_origin_y + underline->offset,
+			.right = baseline_origin_x + underline->width,
+			.bottom = baseline_origin_y + underline->offset + thickness,
+		};
+
+		renderer->d2d_context->FillRectangle(rect, temp_brush);
+	}
+
 	return hr;
 }
 
