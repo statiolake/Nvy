@@ -309,6 +309,9 @@ void UpdateFontMetrics(Renderer *renderer, float font_size, Vec<Array<wchar_t, M
     renderer->font_height = renderer->font_ascent + renderer->font_descent;
     renderer->font_height *= renderer->linespace_factor;
 
+	// We need IDWriteTextFormat2, so first create IDWriteTextFormat to
+	// temporary variable. Later set renderer->dwrite_text_format with
+	// IDWriteTextFormat2.
 	IDWriteTextFormat *dwrite_text_format;
 	WIN_CHECK(renderer->dwrite_factory->CreateTextFormat(
 		renderer->font,
@@ -323,40 +326,44 @@ void UpdateFontMetrics(Renderer *renderer, float font_size, Vec<Array<wchar_t, M
 	WIN_CHECK(dwrite_text_format->QueryInterface<IDWriteTextFormat2>(&renderer->dwrite_text_format));
 	SafeRelease(&dwrite_text_format);
 
-	// set fallback fonts
-	IDWriteFontFallbackBuilder *dwrite_fallback_builder;
-	WIN_CHECK(renderer->dwrite_factory->CreateFontFallbackBuilder(&dwrite_fallback_builder));
-	for (int i = 0; i < renderer->fallback_fonts.size(); i++) {
-		const wchar_t *family_name = renderer->fallback_fonts[i].data();
-		BOOL exists;
-		uint32_t index;
-		font_collection->FindFamilyName(family_name, &index, &exists);
-		if (!exists) {
-			continue;
+	// set fallback fonts if necessary
+	if (renderer->fallback_fonts.size() > 0) {
+		IDWriteFontFallbackBuilder *dwrite_fallback_builder;
+		WIN_CHECK(renderer->dwrite_factory->CreateFontFallbackBuilder(&dwrite_fallback_builder));
+		for (int i = 0; i < renderer->fallback_fonts.size(); i++) {
+			const wchar_t *family_name = renderer->fallback_fonts[i].data();
+			BOOL exists;
+			uint32_t index;
+			font_collection->FindFamilyName(family_name, &index, &exists);
+			if (!exists) {
+				continue;
+			}
+
+			IDWriteFontFamily *font_family;
+			WIN_CHECK(font_collection->GetFontFamily(index, &font_family));
+
+			IDWriteFont *font;
+			WIN_CHECK(font_family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font));
+			IDWriteFont1 *font1;
+			WIN_CHECK(font->QueryInterface(&font1));
+
+			Vec<DWRITE_UNICODE_RANGE> ranges;
+			ranges.resize(1);
+			uint32_t range_count;
+			while (font1->GetUnicodeRanges(ranges.size(), ranges.data(), &range_count) == E_NOT_SUFFICIENT_BUFFER) {
+				ranges.resize(ranges.size() * 2);
+			}
+
+			const wchar_t *family_names[] = {family_name};
+			WIN_CHECK(dwrite_fallback_builder->AddMapping(ranges.data(), range_count, family_names, 1));
 		}
 
-		IDWriteFontFamily *font_family;
-		WIN_CHECK(font_collection->GetFontFamily(index, &font_family));
-
-		IDWriteFont *font;
-		WIN_CHECK(font_family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font));
-		IDWriteFont1 *font1;
-		WIN_CHECK(font->QueryInterface(&font1));
-
-		Vec<DWRITE_UNICODE_RANGE> ranges;
-		ranges.resize(1);
-		uint32_t range_count;
-		while (font1->GetUnicodeRanges(ranges.size(), ranges.data(), &range_count) == E_NOT_SUFFICIENT_BUFFER) {
-			ranges.resize(ranges.size() * 2);
-		}
-
-		const wchar_t *family_names[] = {family_name};
-		WIN_CHECK(dwrite_fallback_builder->AddMapping(ranges.data(), range_count, family_names, 1));
+		// Set fallback
+		IDWriteFontFallback *dwrite_font_fallback;
+		WIN_CHECK(dwrite_fallback_builder->CreateFontFallback(&dwrite_font_fallback));
+		WIN_CHECK(renderer->dwrite_text_format->SetFontFallback(dwrite_font_fallback));
+		SafeRelease(&dwrite_fallback_builder);
 	}
-	IDWriteFontFallback *dwrite_font_fallback;
-	WIN_CHECK(dwrite_fallback_builder->CreateFontFallback(&dwrite_font_fallback));
-	WIN_CHECK(renderer->dwrite_text_format->SetFontFallback(dwrite_font_fallback));
-	SafeRelease(&dwrite_fallback_builder);
 
 	WIN_CHECK(renderer->dwrite_text_format->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, renderer->font_height, renderer->font_ascent * renderer->linespace_factor));
 	WIN_CHECK(renderer->dwrite_text_format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR));
