@@ -448,17 +448,26 @@ D2D1_RECT_F GetCursorForegroundRect(Renderer *renderer, D2D1_RECT_F cursor_bg_re
 	return cursor_bg_rect;
 }
 
-void DrawHighlightedText(Renderer *renderer, D2D1_RECT_F rect, wchar_t *text, uint32_t length, HighlightAttributes *hl_attribs) {
-	IDWriteTextLayout *text_layout = nullptr;
+void DrawHighlightedCharacter(Renderer *renderer, D2D1_RECT_F rect, wchar_t *character, uint32_t wide_char_factor, HighlightAttributes *hl_attribs) {
+	IDWriteTextLayout *temp_text_layout = nullptr;
 	WIN_CHECK(renderer->dwrite_factory->CreateTextLayout(
-		text,
-		length,
+		character,
+		wide_char_factor,
 		renderer->dwrite_text_format,
 		rect.right - rect.left,
 		rect.bottom - rect.top,
-		&text_layout
+		&temp_text_layout
 	));
+	IDWriteTextLayout1 *text_layout;
+	temp_text_layout->QueryInterface<IDWriteTextLayout1>(&text_layout);
+	temp_text_layout->Release();
+
 	ApplyHighlightAttributes(renderer, hl_attribs, text_layout, 0, 1);
+
+	// Correct font width
+	float width = renderer->font_width * wide_char_factor;
+	DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(0), .length = 1 };
+	text_layout->SetCharacterSpacing(0, -100, width, range);
 
 	renderer->d2d_context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 	text_layout->Draw(renderer, renderer->glyph_renderer, rect.left, rect.top);
@@ -661,7 +670,7 @@ void DrawCursor(Renderer *renderer) {
 	DrawBackgroundRect(renderer, cursor_fg_rect, &cursor_hl_attribs);
 
 	if (renderer->cursor.mode_info->shape == CursorShape::Block) {
-		DrawHighlightedText(renderer, cursor_fg_rect, &renderer->grid_chars[cursor_grid_offset], 
+		DrawHighlightedCharacter(renderer, cursor_fg_rect, &renderer->grid_chars[cursor_grid_offset], 
 			double_width_char_factor, &cursor_hl_attribs);
 	}
 }
