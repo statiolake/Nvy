@@ -210,26 +210,6 @@ void RendererResize(Renderer *renderer, uint32_t width, uint32_t height) {
 	InitializeWindowDependentResources(renderer, width, height);
 }
 
-float GetTextWidth(Renderer *renderer, wchar_t *text, uint32_t length) {
-	// Create dummy text format to hit test the width of the font
-	IDWriteTextLayout *test_text_layout = nullptr;
-	WIN_CHECK(renderer->dwrite_factory->CreateTextLayout(
-		text,
-		length,
-		renderer->dwrite_text_format,
-		0.0f,
-		0.0f,
-		&test_text_layout
-	));
-
-	DWRITE_HIT_TEST_METRICS metrics;
-	float _;
-	WIN_CHECK(test_text_layout->HitTestTextPosition(0, 0, &_, &_, &metrics));
-	test_text_layout->Release();
-
-	return metrics.width;
-}
-
 void UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_string, int strlen) {
     font_size = max(5.0f, min(font_size, 150.0f));
     renderer->last_requested_font_size = font_size;
@@ -491,24 +471,26 @@ void DrawGridLine(Renderer *renderer, int row) {
 
 	uint16_t hl_attrib_id = renderer->grid_cell_properties[base].hl_attrib_id;
 	int col_offset = 0;
-	for (int i = 0; i < renderer->grid_cols; ++i) {
-		// Add spacing for wide chars
-		if (renderer->grid_cell_properties[base + i].is_wide_char) {
-			float char_width = GetTextWidth(renderer, &renderer->grid_chars[base + i], 2);
-			DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i), .length = 1 };
-			text_layout->SetCharacterSpacing(0, (renderer->font_width * 2) - char_width, 0, range);
-		}
 
-		// Add spacing for unicode chars. These characters are still single char width, 
-		// but some of them by default will take up a bit more or less, leading to issues. 
-		// So we realign them here.	
-		else if(renderer->grid_chars[base + i] > 0xFF) {
-			float char_width = GetTextWidth(renderer, &renderer->grid_chars[base + i], 1);
-			if(abs(char_width - renderer->font_width) > 0.01f) {
-				DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i), .length = 1 };
-				text_layout->SetCharacterSpacing(0, renderer->font_width - char_width, 0, range);
-			}
-		}
+	for (int i = 0; i < renderer->grid_cols; ++i) {
+		// Correct font width
+		float width = renderer->grid_cell_properties[base + i].is_wide_char ? renderer->font_width * 2.0f : renderer->font_width;
+		DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i), .length = 1 };
+		// Hacky. By specifying -100 (huge negative value) for trailing spaces,
+		// a character will be collapsed. However, by setting
+		// minimumAdvanceWidth, the character will never collapsed under the
+		// specified width. So, setting minimumAdvanceWidth to the desired
+		// value can make the character exactly the width we want. This way is
+		// much faster than measuring width of every character and setting
+		// character spacing manually.
+		//
+		// Collapsing first by negative trailing spaces are needed: if we set
+		// it to 0, we can no longer make the character smaller than its
+		// original width. That's because minimumAdvanceWidth is `minimum`
+		// value, so the (already) larger value will never be affected.
+		// Therefore, without collapsing, we can never adjust "a bit larger"
+		// unicode characters to fit in the width.
+		text_layout->SetCharacterSpacing(0, -100, width, range);
 
 		// Check if the attributes change, 
 		// if so draw until this point and continue with the new attributes
