@@ -1,5 +1,9 @@
-#include "renderer.h"
+﻿#include "renderer.h"
 #include "renderer/glyph_renderer.h"
+#include <d2d1.h>
+#include <fstream>
+#include <chrono>
+#include <unordered_map>
 
 void InitializeD2D(Renderer *renderer) {
 	D2D1_FACTORY_OPTIONS options {};
@@ -557,7 +561,14 @@ void DrawGridLine(Renderer *renderer, int row) {
 	text_layout->Release();
 }
 
-void DrawGridLines(Renderer *renderer, mpack_node_t grid_lines) {
+void SetDirtyRow(Renderer *renderer, int row) {
+	renderer->dirty_rects.push_back({
+		.start = { .row = row, .col = 0 },
+		.end = { .row = row + 1, .col = renderer->grid_cols },
+	});
+}
+
+void UpdateGridLines(Renderer *renderer, mpack_node_t grid_lines) {
 	assert(renderer->grid_chars != nullptr);
 	assert(renderer->grid_cell_properties != nullptr);
 	
@@ -575,7 +586,6 @@ void DrawGridLines(Renderer *renderer, mpack_node_t grid_lines) {
 		int col_offset = col_start;
 		int hl_attrib_id = 0;
 		for (size_t j = 0; j < cells_array_length; ++j) {
-
 			mpack_node_t cells = mpack_node_array_at(cells_array, j);
 			size_t cells_length = mpack_node_array_length(cells);
 
@@ -635,7 +645,7 @@ void DrawGridLines(Renderer *renderer, mpack_node_t grid_lines) {
 			col_offset += wstrlen_with_repetitions;
 		}
 
-		DrawGridLine(renderer, row);
+		SetDirtyRow(renderer, row);
 	}
 }
 
@@ -791,7 +801,29 @@ void UpdateCursorModeInfos(Renderer *renderer, mpack_node_t mode_info_set_params
 	}
 }
 
-void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
+void ScrollCellRect(Renderer *renderer, CellRect &rect, int rows) {
+	rect.start.row += rows;
+	rect.end.row += rows;
+
+	// Adjust start / end rows within bounds.
+	if (rect.start.row < 0) {
+		rect.start.row = 0;
+	}
+
+	if (rect.start.row > renderer->grid_rows) {
+		rect.start.row = renderer->grid_rows;
+	}
+
+	if (rect.end.row < 0) {
+		rect.end.row = 0;
+	}
+
+	if (rect.end.row > renderer->grid_rows) {
+		rect.end.row = renderer->grid_rows;
+	}
+}
+
+void ScrollGrid(Renderer *renderer, mpack_node_t scroll_region) {
 	mpack_node_t scroll_region_params = mpack_node_array_at(scroll_region, 1);
 
 	int64_t top = mpack_node_array_at(scroll_region_params, 1).data->value.i;
@@ -804,6 +836,14 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
 	// Currently nvim does not support horizontal scrolling, 
 	// the parameter is reserved for later use
 	assert(cols == 0);
+
+	// Scroll already created dirty_rects according to rows.
+	for (auto &rect : renderer->dirty_rects) {
+		ScrollCellRect(renderer, rect, rows);
+	}
+
+	// counts up total scrolled lines
+	renderer->row_scrolled += rows;
 
 	// This part is slightly cryptic, basically we're just
 	// iterating from top to bottom or vice versa depending on scroll direction.
@@ -836,14 +876,14 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
         // nvim since it can require multiple scrolls per frame, the latter
         // I can't seem to make work with the FLIP_SEQUENTIAL swapchain model.
         // Thus we fall back to drawing the appropriate scrolled grid lines
-        DrawGridLine(renderer, target_row);
+        SetDirtyRow(renderer, target_row);
 	}
 
     // Redraw the line which the cursor has moved to, as it is no
     // longer guaranteed that the cursor is still there
     int cursor_row = renderer->cursor.row - rows;
     if(cursor_row >= 0 && cursor_row < renderer->grid_rows) {
-        DrawGridLine(renderer, cursor_row);
+        SetDirtyRow(renderer, cursor_row);
     }
 }
 
@@ -927,22 +967,15 @@ void ClearGrid(Renderer *renderer) {
 		.right = renderer->grid_cols * renderer->font_width,
 		.bottom = renderer->grid_rows * renderer->font_height
 	};
-	DrawBackgroundRect(renderer, rect, &renderer->hl_attribs[0]);
+	renderer->dirty_rects.push_back({
+		.start = { .row = 0, .col = 0 },
+		.end = { .row = renderer->grid_rows, .col = renderer->grid_cols },
+	});
 }
 
-void StartDraw(Renderer *renderer) {
-	if (!renderer->draw_active) {
-		WaitForSingleObjectEx(
-			renderer->swapchain_wait_handle,
-			1000,
-			true
-		);
-
-		renderer->d2d_context->SetTarget(renderer->d2d_target_bitmap);
-		renderer->d2d_context->BeginDraw();
-		renderer->d2d_context->SetTransform(D2D1::IdentityMatrix());
-		renderer->draw_active = true;
-	}
+void InitializeRedraw(Renderer *renderer) {
+	renderer->row_scrolled = 0;
+	renderer->dirty_rects.clear();
 }
 
 void CopyFrontToBack(Renderer *renderer) {
@@ -959,6 +992,66 @@ void CopyFrontToBack(Renderer *renderer) {
 void FinishDraw(Renderer *renderer) {
 	renderer->d2d_context->EndDraw();
 
+	std::ofstream ofs("nvy.log", std::ios::app);
+	ofs << "finish draw" << std::endl;
+
+	// Calculate dirty rects
+	Vec<RECT> dirty_rects;
+	for (auto const &rect : renderer->dirty_rects) {
+		dirty_rects.push_back({
+			.left = static_cast<LONG>(rect.start.col * renderer->font_width),
+			.top = static_cast<LONG>(rect.start.row * renderer->font_height),
+			.right = static_cast<LONG>(rect.end.col * renderer->font_width),
+			.bottom = static_cast<LONG>(rect.end.row * renderer->font_height),
+		});
+	}
+
+	// Calculate scroll rect & offset
+	RECT scroll_rect = {};
+	POINT scroll_offset = {};
+
+	assert(abs(renderer->row_scrolled) <= renderer->grid_rows);
+
+	if (renderer->row_scrolled < 0) {
+		// Scrolled up. Be careful that sign is opposite between Neovim and DirectX.
+		scroll_rect.left = 0;
+		scroll_rect.top = static_cast<LONG>(-renderer->row_scrolled * renderer->font_height);
+		scroll_rect.right = static_cast<LONG>(renderer->grid_cols * renderer->font_width);
+		scroll_rect.bottom = static_cast<LONG>(renderer->grid_rows * renderer->font_height);
+		scroll_offset.y = -renderer->row_scrolled * renderer->font_height;
+	} else if (renderer->row_scrolled >= 0) {
+		// Scrolled down (or not scrolled).
+		scroll_rect.left = 0;
+		scroll_rect.top = 0;
+		scroll_rect.right = static_cast<LONG>(renderer->grid_cols * renderer->font_width);
+		scroll_rect.bottom = static_cast<LONG>((renderer->grid_rows - renderer->row_scrolled) * renderer->font_height);
+		scroll_offset.y = -renderer->row_scrolled * renderer->font_height;
+	}
+
+	RECT client_rect = {};
+	GetClientRect(renderer->hwnd, &client_rect);
+	RECT dr[] = {client_rect};
+	// RECT dr[] = {{
+	// 	.left = 0,
+	// 	.top = 0,
+	// 	.right = static_cast<LONG>(renderer->grid_cols * renderer->font_width),
+	// 	.bottom = static_cast<LONG>(renderer->grid_rows * renderer->font_height),
+	// }};
+
+	ofs << "client_rect:" << client_rect.left << " " << client_rect.top << " " << client_rect.right << " " << client_rect.bottom << std::endl;
+	ofs << "rect:" << dr[0].left << " " << dr[0].top << " " << dr[0].right << " " << dr[0].bottom << std::endl;
+	// ofs << "rects:" << dirty_rects.size() << std::endl;
+	DXGI_PRESENT_PARAMETERS param = {
+		// .DirtyRectsCount = static_cast<UINT>(dirty_rects.size()),
+		// .pDirtyRects = dirty_rects.data(),
+		// .pScrollRect = &scroll_rect,
+		// .pScrollOffset = &scroll_offset,
+		.DirtyRectsCount = 0,
+		.pDirtyRects = dr,
+		.pScrollRect = &scroll_rect,
+		.pScrollOffset = &scroll_offset,
+	};
+
 	HRESULT hr = renderer->dxgi_swapchain->Present(0, 0);
 	renderer->draw_active = false;
 
@@ -969,9 +1062,92 @@ void FinishDraw(Renderer *renderer) {
 	}
 }
 
-void RendererRedraw(Renderer *renderer, mpack_node_t params) {
-	StartDraw(renderer);
+std::unordered_map<wchar_t, IDWriteTextLayout1 *> cache;
+void RedrawAll(Renderer *renderer) {
+	// Start drawing
+	WaitForSingleObjectEx(renderer->swapchain_wait_handle, 1000, true);
+	renderer->d2d_context->BeginDraw();
+	renderer->d2d_context->SetTarget(renderer->d2d_target_bitmap);
+	renderer->d2d_context->SetTransform(D2D1::IdentityMatrix());
+	renderer->draw_active = true;
 
+	// Redraw lines
+	// Vec<bool> is_redrawn;
+	// is_redrawn.resize(renderer->grid_rows);
+	// for (auto const &rect : renderer->dirty_rects) {
+	// 	for (int row = rect.start.row; row < rect.end.row; row++) {
+	// 		if (is_redrawn[row]) continue;
+	// 		DrawGridLine(renderer, row);
+	// 	}
+	// }
+	D2D1_RECT_F entire = {
+		.left = 0,
+		.top = 0,
+		.right = renderer->grid_cols * renderer->font_width,
+		.bottom = renderer->grid_rows * renderer->font_height,
+	};
+
+	renderer->d2d_context->PushAxisAlignedClip(entire, D2D1_ANTIALIAS_MODE_ALIASED);
+	renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
+	renderer->d2d_context->FillRectangle(&entire, renderer->d2d_background_rect_brush);
+	renderer->glyph_renderer->drawing_effect_brush->SetColor(D2D1::ColorF(D2D1::ColorF::Black));
+
+	IDWriteTextLayout1 *text_layout_for_a = nullptr;
+	for (int row = 0; row < renderer->grid_rows; ++row) {
+		for (int col = 0; col < renderer->grid_cols; ++col) {
+			auto *wstr = &renderer->grid_chars[row * renderer->grid_cols + col];
+			if (*wstr == L'\0') continue;
+			// DrawGridLine(renderer, row);
+			D2D1_RECT_F rect = {
+				.left = col * renderer->font_width,
+				.top = row * renderer->font_height,
+				.right = (col + 1) * renderer->font_width,
+				.bottom = (row + 1) * renderer->font_height,
+			};
+
+			IDWriteTextLayout1 *text_layout;
+			if (cache.contains(*wstr)) {
+				text_layout = cache[*wstr];
+			} else {
+				IDWriteTextLayout *old_text_layout;
+				WIN_CHECK(
+					renderer->dwrite_factory->CreateTextLayout(
+						wstr, 1, renderer->dwrite_text_format,
+						renderer->font_width * 2, renderer->font_height,
+						&old_text_layout
+					)
+				);
+				WIN_CHECK(old_text_layout->QueryInterface(&text_layout));
+				SafeRelease(&old_text_layout);
+			}
+
+			renderer->d2d_context->DrawTextLayout(
+				{ rect.left, rect.top },
+				text_layout,
+				renderer->glyph_renderer->drawing_effect_brush,
+				D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
+			);
+
+			cache[*wstr] = text_layout;
+		}
+	}
+
+	if(!renderer->ui_busy) {
+		//DrawCursor(renderer);
+	}
+
+	DrawBorderRectangles(renderer);
+
+	renderer->d2d_context->PopAxisAlignedClip();
+
+	FinishDraw(renderer);
+}
+
+std::optional<std::chrono::system_clock::time_point> start = std::nullopt;
+void RendererRedraw(Renderer *renderer, mpack_node_t params) {
+	if (!start) start = std::chrono::system_clock::now();
+
+	InitializeRedraw(renderer);
 	uint64_t redraw_commands_length = mpack_node_array_length(params);
 	for (uint64_t i = 0; i < redraw_commands_length; ++i) {
 		mpack_node_t redraw_command_arr = mpack_node_array_at(params, i);
@@ -993,14 +1169,15 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params) {
 			UpdateHighlightAttributes(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "grid_line")) {
-			DrawGridLines(renderer, redraw_command_arr);
+			UpdateGridLines(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "grid_cursor_goto")) {
 			// If the old cursor position is still within the row bounds,
 			// redraw the line to get rid of the cursor
 			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
+				SetDirtyRow(renderer, renderer->cursor.row);
 			}
+
 			UpdateCursorPos(renderer, redraw_command_arr);
 			UpdateImePos(renderer);
 		}
@@ -1010,7 +1187,7 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params) {
 		else if (MPackMatchString(redraw_command_name, "mode_change")) {
 			// Redraw cursor if its inside the bounds
 			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
+				SetDirtyRow(renderer, renderer->cursor.row);
 			}
 			UpdateCursorMode(renderer, redraw_command_arr);
 		}
@@ -1021,21 +1198,21 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params) {
 			renderer->ui_busy = true;
 			// Hide cursor while UI is busy
 			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
+				SetDirtyRow(renderer, renderer->cursor.row);
 			}
 		}
 		else if (MPackMatchString(redraw_command_name, "busy_stop")) {
 			renderer->ui_busy = false;
 		}
 		else if (MPackMatchString(redraw_command_name, "grid_scroll")) {
-			ScrollRegion(renderer, redraw_command_arr);
+			ScrollGrid(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "flush")) {
-			if(!renderer->ui_busy) {
-				DrawCursor(renderer);
-			}
-            DrawBorderRectangles(renderer);
-            FinishDraw(renderer);
+			auto end = std::chrono::system_clock::now();
+			auto elapsed = end - *start;
+			std::ofstream ofs("nvy.log", std::ios::app);
+			ofs << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << ": flush" << std::endl;
+			RedrawAll(renderer);
 		}
 	}
 }

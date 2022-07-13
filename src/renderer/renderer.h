@@ -54,6 +54,11 @@ struct CellProperty {
 	bool is_wide_char;
 };
 
+struct CellRect {
+	GridPoint start;
+	GridPoint end;
+};
+
 constexpr int MAX_HIGHLIGHT_ATTRIBS = 0xFFFF;
 constexpr int MAX_CURSOR_MODE_INFOS = 64;
 constexpr int MAX_FONT_LENGTH = 128;
@@ -108,6 +113,9 @@ struct Renderer {
 	HWND hwnd;
 	bool draw_active;
 	bool ui_busy;
+
+	int row_scrolled;
+	Vec<CellRect> dirty_rects;
 };
 
 void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, float linespace_factor, float monitor_dpi);
