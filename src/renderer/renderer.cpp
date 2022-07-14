@@ -849,14 +849,37 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
 			&renderer->grid_cell_properties[i * renderer->grid_cols + left],
 			(right - left) * sizeof(CellProperty)
 		);
-
-        // Sadly I have given up on making use of IDXGISwapChain1::Present1
-        // scroll_rects or bitmap copies. The former seems insufficient for
-        // nvim since it can require multiple scrolls per frame, the latter
-        // I can't seem to make work with the FLIP_SEQUENTIAL swapchain model.
-        // Thus we fall back to drawing the appropriate scrolled grid lines
-        DrawGridLine(renderer, target_row);
 	}
+
+	// Copy bitmap on that region
+	D2D1_RECT_F src_rect_f = {
+		.left = left * renderer->font_width,
+		.top = top * renderer->font_height,
+		.right = right * renderer->font_width,
+		.bottom = bottom * renderer->font_height,
+	};
+	D2D1_RECT_F dst_rect = {
+		.left = left * renderer->font_width,
+		.top = (top - rows) * renderer->font_height,
+		.right = right * renderer->font_width,
+		.bottom = (bottom - rows) * renderer->font_height,
+	};
+	D2D1_RECT_U src_rect_u = {
+		.left = static_cast<UINT32>(src_rect_f.left),
+		.top = static_cast<UINT32>(src_rect_f.top),
+		.right = static_cast<UINT32>(src_rect_f.right),
+		.bottom = static_cast<UINT32>(src_rect_f.bottom),
+	};
+	ID2D1Bitmap *tmp = nullptr;
+	D2D1_SIZE_U size = { src_rect_u.right - src_rect_u.left, src_rect_u.bottom - src_rect_u.top };
+	D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(renderer->d2d_target_bitmap->GetPixelFormat());
+	renderer->d2d_context->CreateBitmap(size, props, &tmp);
+	D2D1_POINT_2U origin = { 0, 0 };
+	tmp->CopyFromBitmap(&origin, renderer->d2d_target_bitmap, &src_rect_u);
+	renderer->d2d_context->PushAxisAlignedClip(src_rect_f, D2D1_ANTIALIAS_MODE_ALIASED);
+	renderer->d2d_context->DrawBitmap(tmp, dst_rect);
+	renderer->d2d_context->PopAxisAlignedClip();
+	SafeRelease(&tmp);
 
     // Redraw the line which the cursor has moved to, as it is no
     // longer guaranteed that the cursor is still there
