@@ -477,20 +477,88 @@ void DrawHighlightedCharacter(Renderer *renderer, D2D1_RECT_F rect, wchar_t *cha
 	renderer->d2d_context->PopAxisAlignedClip();
 }
 
-void DrawGridLine(Renderer *renderer, int row) {
-	int base = row * renderer->grid_cols;
+void DrawGridLine(Renderer *renderer, int row, int col_start, int col_end) {
+	// Redraw only required part, from col_start to col_end.
+	//
+	// However, in order to render things correctly, we may need to adjust
+	// col_start and col_end. This is mainly because following two reasons:
+	//
+	// - To render ligatures correctly.
+	//
+	//     Changing "==" to "!=" may notify change of first "=" to "!".
+	//     However, rendering only "!" does not render "!=" if font support
+	//     ligatures, so we need to extend col_end to overwrite "!=". Same
+	//     goes for col_start.
+	//
+	// - To render wide characters correctly.
+	//
+	//     If the col_end is left half of wide characters, we need to extend
+	//     col_end to include the right half. Samely, if the col_start is
+	//     right half of the wide characters, we need to extend col_start.
+	//
+	// To achieve both, we extend col_start and col_end to nearest boundary:
+	// boundery is either whitespace character or another wide character,
+	// assuming they are not part of ligatures. For col_start, we further
+	// extend it if the left cell is the left half of the wide character.
+	auto to_grid_index = [&](int col) {
+		return row * renderer->grid_cols + col;
+	};
+	auto is_boundary = [&](int col) {
+		int index = to_grid_index(col);
+		// Non-surrogate pair will stop at '\0'. This is left half of the wide
+		// character, but accept that for now. That's adjusted later.
+		return renderer->grid_chars[index] == L' '
+			|| renderer->grid_chars[index] == L'\0'
+			|| renderer->grid_cell_properties[index].is_wide_char;
+	};
+
+	// Adjust col_start.
+	// make range exclusive temporary: col_start < (string) < col_end.
+	--col_start;
+	for (; col_start >= 0; --col_start) {
+		if (is_boundary(col_start)) {
+			break;
+		}
+	}
+	// restore range inclusive: col_start <= (string) < col_end.
+	++col_start;
+
+	// If col_start is the right half of the wide character, include left
+	// half.
+	if (col_start > 0 && renderer->grid_cell_properties[to_grid_index(col_start - 1)].is_wide_char) {
+		--col_start;
+	}
+
+	// Adjust col_end.
+	// col_end is already exlusive, no need to convert to exlusive.
+	for (; col_end < renderer->grid_cols; ++col_end) {
+		if (is_boundary(col_end)) {
+			break;
+		}
+	}
+
+	// if col_end is the left half of the wide character, include right half.
+	// Be careful col_end is exlusive.
+	if (col_end > 0 && renderer->grid_cell_properties[to_grid_index(col_end - 1)].is_wide_char) {
+		++col_end;
+	}
+
+	// If adjusting causes empty range, do nothing.
+	if (col_start >= col_end) {
+		return;
+	}
 
 	D2D1_RECT_F rect {
-		.left = 0.0f,
+		.left = col_start * renderer->font_width,
 		.top = row * renderer->font_height,
-		.right = renderer->grid_cols * renderer->font_width,
-		.bottom = (row * renderer->font_height) + renderer->font_height
+		.right = col_end * renderer->font_width,
+		.bottom = (row + 1) * renderer->font_height
 	};
 
 	IDWriteTextLayout *temp_text_layout = nullptr;
 	WIN_CHECK(renderer->dwrite_factory->CreateTextLayout(
-		&renderer->grid_chars[base],
-		renderer->grid_cols,
+		&renderer->grid_chars[to_grid_index(col_start)],
+		col_end - col_start,
 		renderer->dwrite_text_format,
 		rect.right - rect.left,
 		rect.bottom - rect.top,
@@ -500,13 +568,16 @@ void DrawGridLine(Renderer *renderer, int row) {
 	temp_text_layout->QueryInterface<IDWriteTextLayout1>(&text_layout);
 	temp_text_layout->Release();
 
-	uint16_t hl_attrib_id = renderer->grid_cell_properties[base].hl_attrib_id;
-	int col_offset = 0;
+	uint16_t hl_attrib_id = renderer->grid_cell_properties[to_grid_index(col_start)].hl_attrib_id;
+	int curr_hl_col_start = col_start;
 
-	for (int i = 0; i < renderer->grid_cols; ++i) {
+	auto to_str_index = [&](int col) { return col - col_start; };
+	for (int col = col_start; col < col_end; ++col) {
 		// Correct font width
-		float width = renderer->grid_cell_properties[base + i].is_wide_char ? renderer->font_width * 2.0f : renderer->font_width;
-		DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i), .length = 1 };
+		auto const &ch = renderer->grid_chars[to_grid_index(col)];
+		auto const &props = renderer->grid_cell_properties[to_grid_index(col)];
+		float width = props.is_wide_char ? renderer->font_width * 2.0f : renderer->font_width;
+		DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(to_str_index(col)), .length = 1 };
 		// Hacky. By specifying -100 (huge negative value) for trailing spaces,
 		// a character will be collapsed. However, by setting
 		// minimumAdvanceWidth, the character will never collapsed under the
@@ -525,27 +596,33 @@ void DrawGridLine(Renderer *renderer, int row) {
 
 		// Check if the attributes change, 
 		// if so draw until this point and continue with the new attributes
-		if (renderer->grid_cell_properties[base + i].hl_attrib_id != hl_attrib_id) {
+		if (props.hl_attrib_id != hl_attrib_id) {
 			D2D1_RECT_F bg_rect {
-				.left = col_offset * renderer->font_width,
+				.left = curr_hl_col_start * renderer->font_width,
 				.top = row * renderer->font_height,
-				.right = col_offset * renderer->font_width + renderer->font_width * (i - col_offset),
-				.bottom = (row * renderer->font_height) + renderer->font_height
+				.right = col * renderer->font_width + renderer->font_width,
+				.bottom = (row + 1) * renderer->font_height,
 			};
 			DrawBackgroundRect(renderer, bg_rect, &renderer->hl_attribs[hl_attrib_id]);
-			ApplyHighlightAttributes(renderer, &renderer->hl_attribs[hl_attrib_id], text_layout, col_offset, i);
+			ApplyHighlightAttributes(
+				renderer,
+				&renderer->hl_attribs[hl_attrib_id],
+				text_layout,
+				to_str_index(curr_hl_col_start),
+				to_str_index(col)
+			);
 
-			hl_attrib_id = renderer->grid_cell_properties[base + i].hl_attrib_id;
-			col_offset = i;
+			hl_attrib_id = props.hl_attrib_id;
+			curr_hl_col_start = col;
 		}
 	}
 	
 	// Draw the remaining columns, there is always atleast the last column to draw,
 	// but potentially more in case the last X columns share the same hl_attrib
 	D2D1_RECT_F last_rect = rect;
-	last_rect.left = col_offset * renderer->font_width;
+	last_rect.left = curr_hl_col_start * renderer->font_width;
 	DrawBackgroundRect(renderer, last_rect, &renderer->hl_attribs[hl_attrib_id]);
-	ApplyHighlightAttributes(renderer, &renderer->hl_attribs[hl_attrib_id], text_layout, col_offset, renderer->grid_cols);
+	ApplyHighlightAttributes(renderer, &renderer->hl_attribs[hl_attrib_id], text_layout, to_str_index(curr_hl_col_start), to_str_index(col_end));
 
 	renderer->d2d_context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 	if(renderer->disable_ligatures) {
@@ -554,7 +631,7 @@ void DrawGridLine(Renderer *renderer, int row) {
 			.length = static_cast<uint32_t>(renderer->grid_cols) 
 		});
 	}
-	text_layout->Draw(renderer, renderer->glyph_renderer, 0.0f, rect.top);
+	text_layout->Draw(renderer, renderer->glyph_renderer, rect.left, rect.top);
 	renderer->d2d_context->PopAxisAlignedClip();
 	text_layout->Release();
 }
@@ -656,7 +733,9 @@ void DrawGridLines(Renderer *renderer, mpack_node_t grid_lines) {
 			}
 		}
 
-		DrawGridLine(renderer, row);
+		// Redraw modified region only
+		int col_end = offset - row * renderer->grid_cols;
+		DrawGridLine(renderer, row, col_start, col_end);
 	}
 }
 
@@ -886,8 +965,9 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
     // Redraw the line which the cursor has moved to, as it is no
     // longer guaranteed that the cursor is still there
     int cursor_row = renderer->cursor.row - rows;
+	int cursor_col = renderer->cursor.col;
     if(cursor_row >= 0 && cursor_row < renderer->grid_rows) {
-        DrawGridLine(renderer, cursor_row);
+        DrawGridLine(renderer, cursor_row, cursor_col, cursor_col + 1);
     }
 }
 
@@ -1042,8 +1122,8 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params) {
 		else if (MPackMatchString(redraw_command_name, "grid_cursor_goto")) {
 			// If the old cursor position is still within the row bounds,
 			// redraw the line to get rid of the cursor
-			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
+			if(renderer->cursor.row < renderer->grid_rows && renderer->cursor.col < renderer->grid_cols) {
+				DrawGridLine(renderer, renderer->cursor.row, renderer->cursor.col, renderer->cursor.col + 1);
 			}
 			UpdateCursorPos(renderer, redraw_command_arr);
 			UpdateImePos(renderer);
@@ -1053,8 +1133,8 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params) {
 		}
 		else if (MPackMatchString(redraw_command_name, "mode_change")) {
 			// Redraw cursor if its inside the bounds
-			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
+			if(renderer->cursor.row < renderer->grid_rows && renderer->cursor.col < renderer->grid_cols) {
+				DrawGridLine(renderer, renderer->cursor.row, renderer->cursor.col, renderer->cursor.col + 1);
 			}
 			UpdateCursorMode(renderer, redraw_command_arr);
 		}
@@ -1064,8 +1144,8 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params) {
 		else if (MPackMatchString(redraw_command_name, "busy_start")) {
 			renderer->ui_busy = true;
 			// Hide cursor while UI is busy
-			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
+			if(renderer->cursor.row < renderer->grid_rows && renderer->cursor.col < renderer->grid_cols) {
+				DrawGridLine(renderer, renderer->cursor.row, renderer->cursor.col, renderer->cursor.col + 1);
 			}
 		}
 		else if (MPackMatchString(redraw_command_name, "busy_stop")) {
