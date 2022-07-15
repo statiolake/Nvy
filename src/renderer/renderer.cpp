@@ -288,6 +288,8 @@ void UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
     renderer->font_descent = ceilf(frac_font_descent + half_linegap);
     renderer->font_height = renderer->font_ascent + renderer->font_descent;
     renderer->font_height *= renderer->linespace_factor;
+    // Similarly, we need the height to be aligned on a per-pixel boundary.
+	renderer->font_height = roundf(renderer->font_height);
 
 	WIN_CHECK(renderer->dwrite_factory->CreateTextFormat(
 		renderer->font,
