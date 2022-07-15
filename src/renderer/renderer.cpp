@@ -481,7 +481,7 @@ void DrawGridLine(Renderer *renderer, int row, int col_start, int col_end) {
 	// Redraw only required part, from col_start to col_end.
 	//
 	// However, in order to render things correctly, we may need to adjust
-	// col_start and col_end. This is mainly because following two reasons:
+	// col_start and col_end. This is mainly because following reasons:
 	//
 	// - To render ligatures correctly.
 	//
@@ -496,10 +496,17 @@ void DrawGridLine(Renderer *renderer, int row, int col_start, int col_end) {
 	//     col_end to include the right half. Samely, if the col_start is
 	//     right half of the wide characters, we need to extend col_start.
 	//
-	// To achieve both, we extend col_start and col_end to nearest boundary:
-	// boundery is either whitespace character or another wide character,
-	// assuming they are not part of ligatures. For col_start, we further
-	// extend it if the left cell is the left half of the wide character.
+	// - To update underline (or undercurl) correctly.
+	//
+	//     Underline or undercurl may slightly overhung because of its
+	//     thickness.
+	//
+	// To achieve both, we first extend both col_start and col_end for each
+	// one more cell to update underlines. Then, we further extend to nearest
+	// boundary: boundery is either whitespace character or another wide
+	// character, assuming they are not part of ligatures, to correctly render
+	// ligatures. For col_start, we extend it if the left cell is the left
+	// half of the wide character in addition to them.
 	auto to_grid_index = [&](int col) {
 		return row * renderer->grid_cols + col;
 	};
@@ -515,6 +522,11 @@ void DrawGridLine(Renderer *renderer, int row, int col_start, int col_end) {
 	// Adjust col_start.
 	// make range exclusive temporary: col_start < (string) < col_end.
 	--col_start;
+
+	// Always include one more left cell if there is another cell.
+	if (col_start >= 0) --col_start;
+
+	// Extend it to nearest boundary.
 	for (; col_start >= 0; --col_start) {
 		if (is_boundary(col_start)) {
 			break;
@@ -523,14 +535,16 @@ void DrawGridLine(Renderer *renderer, int row, int col_start, int col_end) {
 	// restore range inclusive: col_start <= (string) < col_end.
 	++col_start;
 
-	// If col_start is the right half of the wide character, include left
-	// half.
+	// If col_start is the right half of the wide character, include left half
 	if (col_start > 0 && renderer->grid_cell_properties[to_grid_index(col_start - 1)].is_wide_char) {
 		--col_start;
 	}
 
 	// Adjust col_end.
 	// col_end is already exlusive, no need to convert to exlusive.
+
+	// Always include one more right cell if there is.
+	if (col_end < renderer->grid_cols) ++col_end;
 	for (; col_end < renderer->grid_cols; ++col_end) {
 		if (is_boundary(col_end)) {
 			break;
